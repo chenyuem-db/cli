@@ -1,0 +1,1 @@
+Deprecated the `databricks environments setup-local --constraints-only` flag in favour of the orthogonal `--no-dbconnect`. The flag still works (it remains a hidden alias with identical behaviour) but is hidden from `--help` and now prints a one-line deprecation notice; it will be removed in a later release.
