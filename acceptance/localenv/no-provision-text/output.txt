@@ -1,0 +1,10 @@
+
+>>> [CLI] environments setup-local --serverless-version 4 --no-provision
+✔ Project files written (provisioning skipped)
+
+  Compute target      serverless 4
+  Python              3.12
+  databricks-connect  17.2.0
+  pyproject.toml      created
+
+No virtual environment was created (--no-provision). Re-run without --no-provision to create it.

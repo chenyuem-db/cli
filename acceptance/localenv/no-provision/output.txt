@@ -1,0 +1,49 @@
+
+>>> [CLI] environments setup-local --serverless-version 4 --no-provision --output json
+{
+  "schemaVersion": 1,
+  "command": "environments setup-local",
+  "ok": true,
+  "mode": "default",
+  "dryRun": false,
+  "compute": {
+    "source": "serverless",
+    "serverlessVersion": "v4",
+    "envKey": "serverless/serverless-v4"
+  },
+  "resolved": {
+    "pythonVersion": "3.12",
+    "dbconnectVersion": "17.2.0",
+    "artifactSource": "network"
+  },
+  "greenfield": true,
+  "phases": [
+    {
+      "phase": "preflight",
+      "status": "ok"
+    },
+    {
+      "phase": "resolve",
+      "status": "ok"
+    },
+    {
+      "phase": "fetch",
+      "status": "ok"
+    },
+    {
+      "phase": "merge",
+      "status": "ok"
+    },
+    {
+      "phase": "provision",
+      "status": "skipped"
+    },
+    {
+      "phase": "validate",
+      "status": "skipped"
+    }
+  ],
+  "warnings": [],
+  "error": null,
+  "durationMs": [DURATION_MS]
+}

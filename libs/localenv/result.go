@@ -21,7 +21,11 @@ const (
 	CommandName  = CommandGroup + " " + CommandVerb
 
 	// SchemaVersion is the version of the --json output contract (spec §6).
-	// Bump it on any breaking change to the JSON shape.
+	// Bump it on any breaking change to the JSON shape — the set of keys and their
+	// types. Adding a new value to an existing enum field is not such a change: it
+	// stays at 1. The "skipped" phase status is an example — it only appears when a
+	// new opt-in flag (--no-provision) is passed, so a default run's output is
+	// byte-for-byte unchanged and existing consumers see exactly what they did before.
 	SchemaVersion = 1
 )
 
@@ -68,6 +72,11 @@ const (
 	StatusOK      = "ok"
 	StatusError   = "error"
 	StatusPending = "pending"
+	// StatusSkipped marks a phase the run deliberately did not perform because a
+	// flag opted out of it (provision + validate under --no-provision). It is
+	// distinct from StatusPending, which means an earlier phase failed before this
+	// one could run: skipped is a successful outcome, pending is a stopped one.
+	StatusSkipped = "skipped"
 )
 
 // ErrorCode is a stable failure-class identifier surfaced in --json error.code

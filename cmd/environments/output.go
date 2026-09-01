@@ -80,19 +80,65 @@ func renderResult(ctx context.Context, cmd *cobra.Command, res *libslocalenv.Res
 		return nil
 	}
 
+	if provisionSkipped(res) {
+		renderProvisionSkippedSuccess(ctx, res)
+		return nil
+	}
+
 	renderSuccess(ctx, res)
 	return nil
 }
 
-// renderSuccess prints the friendly post-provision summary (DECO-27977).
+// provisionSkipped reports whether the run wrote the project files but skipped
+// creating the virtual environment (--no-provision), so the text summary must
+// not claim a venv or print activation hints for one.
+func provisionSkipped(res *libslocalenv.Result) bool {
+	for _, ph := range res.Phases {
+		if ph.Phase == libslocalenv.PhaseProvision {
+			return ph.Status == libslocalenv.StatusSkipped
+		}
+	}
+	return false
+}
+
+// renderSuccess prints the friendly post-provision summary.
 //
-// It runs only on a non-dry-run success (renderResult returns earlier for JSON,
-// failures, and dry runs), so res.VenvPath is always set: the validate phase — the
-// last thing a successful run does — assigns it unconditionally (see Pipeline.validate).
+// It runs only on a non-dry-run success that actually provisioned (renderResult
+// returns earlier for JSON, failures, dry runs, and --no-provision), so
+// res.VenvPath is always set: the validate phase — the last thing such a run does
+// — assigns it unconditionally (see Pipeline.validate).
 func renderSuccess(ctx context.Context, res *libslocalenv.Result) {
 	cmdio.LogString(ctx, "✔ Local environment ready")
 	cmdio.LogString(ctx, "")
 
+	renderComputeAndResolved(ctx, res)
+	cmdio.LogString(ctx, fmt.Sprintf("  %-20s%s", "Virtual env", res.VenvPath))
+	cmdio.LogString(ctx, fmt.Sprintf("  %-20s%s", "pyproject.toml", pyprojectDetail(res)))
+
+	cmdio.LogString(ctx, "")
+	cmdio.LogString(ctx, "Next steps:")
+	cmdio.LogString(ctx, "  • Activate it:  "+activateHint(res.VenvPath))
+	cmdio.LogString(ctx, "  • Or select "+res.VenvPath+" as the Python interpreter in VS Code / Cursor")
+}
+
+// renderProvisionSkippedSuccess prints the summary for a --no-provision run: the
+// project files were written but no virtual environment was created. It omits the
+// venv line and activation hints renderSuccess prints (res.VenvPath is empty
+// here), and tells the user how to finish the setup.
+func renderProvisionSkippedSuccess(ctx context.Context, res *libslocalenv.Result) {
+	cmdio.LogString(ctx, "✔ Project files written (provisioning skipped)")
+	cmdio.LogString(ctx, "")
+
+	renderComputeAndResolved(ctx, res)
+	cmdio.LogString(ctx, fmt.Sprintf("  %-20s%s", "pyproject.toml", pyprojectDetail(res)))
+
+	cmdio.LogString(ctx, "")
+	cmdio.LogString(ctx, "No virtual environment was created (--no-provision). Re-run without --no-provision to create it.")
+}
+
+// renderComputeAndResolved prints the shared compute-target and resolved-version
+// rows used by both the provisioned and --no-provision success summaries.
+func renderComputeAndResolved(ctx context.Context, res *libslocalenv.Result) {
 	if res.Compute != nil {
 		cmdio.LogString(ctx, fmt.Sprintf("  %-20s%s", "Compute target", res.Compute.Label()))
 	}
@@ -102,20 +148,19 @@ func renderSuccess(ctx context.Context, res *libslocalenv.Result) {
 			cmdio.LogString(ctx, fmt.Sprintf("  %-20s%s", "databricks-connect", res.Resolved.DBConnectVersion))
 		}
 	}
-	cmdio.LogString(ctx, fmt.Sprintf("  %-20s%s", "Virtual env", res.VenvPath))
-	// pyproject.toml was created (greenfield) or updated in place (with a backup).
-	pyprojectDetail := "updated"
-	if res.Greenfield {
-		pyprojectDetail = "created"
-	} else if res.BackupPath != "" {
-		pyprojectDetail = "updated (backup: " + res.BackupPath + ")"
-	}
-	cmdio.LogString(ctx, fmt.Sprintf("  %-20s%s", "pyproject.toml", pyprojectDetail))
+}
 
-	cmdio.LogString(ctx, "")
-	cmdio.LogString(ctx, "Next steps:")
-	cmdio.LogString(ctx, "  • Activate it:  "+activateHint(res.VenvPath))
-	cmdio.LogString(ctx, "  • Or select "+res.VenvPath+" as the Python interpreter in VS Code / Cursor")
+// pyprojectDetail describes what happened to pyproject.toml: created (greenfield)
+// or updated in place (noting the backup when one was written).
+func pyprojectDetail(res *libslocalenv.Result) string {
+	switch {
+	case res.Greenfield:
+		return "created"
+	case res.BackupPath != "":
+		return "updated (backup: " + res.BackupPath + ")"
+	default:
+		return "updated"
+	}
 }
 
 // activateHint returns the shell command to activate the virtual environment,

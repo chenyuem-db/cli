@@ -59,6 +59,16 @@ type Pipeline struct {
 	Compute           ComputeClient
 	PM                PackageManager
 
+	// SkipConstraints (--no-constraints) leaves the remote Python version and
+	// dependency pins unmanaged: the merge writes neither requires-python nor the
+	// [tool.uv] constraint block, and any existing values are left untouched. It is
+	// orthogonal to Mode (the databricks-connect axis).
+	SkipConstraints bool
+	// SkipProvision (--no-provision) writes the project files through the merge
+	// phase, then stops: no Python install, uv sync, or validation. The provision
+	// and validate phases report StatusSkipped and venvPath is omitted.
+	SkipProvision bool
+
 	// Progress, when non-nil, receives a PhaseStarted call as each phase begins.
 	// Left nil by callers that don't render progress (e.g. --output json).
 	Progress Reporter
@@ -172,9 +182,18 @@ func (p *Pipeline) run(ctx context.Context) error {
 	//   - PackageManager.EnsureAvailable may install the manager (uv) if missing.
 	// Both exist to fail fast before real writes, which --dry-run never performs, so
 	// they are skipped in a dry run. Neither result is needed to compute the plan.
-	if p.Check {
+	switch {
+	case p.Check:
 		p.markOK(PhasePreflight, "check")
-	} else {
+	case p.SkipProvision:
+		// --no-provision writes files but never invokes uv, so it must not require
+		// or install it — a files-only run succeeds on a machine without uv. The
+		// project must still be writable, since the merge phase writes to it.
+		if err := ensureWritable(p.ProjectDir); err != nil {
+			return p.fail(PhasePreflight, false, NewError(ErrNotWritable, err, "project directory %s is not writable", filepath.ToSlash(p.ProjectDir)))
+		}
+		p.markOK(PhasePreflight, "no-provision")
+	default:
 		if err := ensureWritable(p.ProjectDir); err != nil {
 			return p.fail(PhasePreflight, false, NewError(ErrNotWritable, err, "project directory %s is not writable", filepath.ToSlash(p.ProjectDir)))
 		}
@@ -234,8 +253,7 @@ func (p *Pipeline) run(ctx context.Context) error {
 	// Check mode stops after planning — nothing below mutates disk.
 	if p.Check {
 		p.markOK(PhaseMerge, "")
-		p.markOK(PhaseProvision, "")
-		p.markOK(PhaseValidate, "")
+		p.markProvisionAndValidate()
 		return nil
 	}
 
@@ -244,6 +262,14 @@ func (p *Pipeline) run(ctx context.Context) error {
 		return err
 	}
 	p.markOK(PhaseMerge, "")
+
+	// --no-provision writes the files but stops here: no Python install, uv sync,
+	// or validation. The provision and validate phases are skipped and venvPath is
+	// left empty (omitted), since no venv is created.
+	if p.SkipProvision {
+		p.markProvisionAndValidate()
+		return nil
+	}
 
 	// Phase: provision — ensure Python, run uv sync, seed pip.
 	p.report(ctx, PhaseProvision)
@@ -384,13 +410,35 @@ func (p *Pipeline) mergePlan(_ context.Context, pyMinor string, c *Constraints, 
 	effective := *c
 	effective.DatabricksConnect = dbcPin
 	effective.EnvironmentVersion = envVersion
+	if p.SkipConstraints {
+		// --no-constraints: leave the remote Python version and dependency pins
+		// unmanaged. The empty/nil values signal both the merge (mergeRequiresPython,
+		// mergeToolUv) and the fresh render to skip those regions, leaving any
+		// existing values untouched.
+		//
+		// The flag governs only what is *written*. A provisioning run still installs
+		// and validates the resolved Python (pyMinor), so if the user's kept
+		// requires-python is disjoint from the target, uv surfaces it as a normal
+		// E_PROVISION rather than this command guessing an alternative. The
+		// --no-constraints --no-provision pairing skips provisioning entirely and
+		// avoids that tension.
+		effective.RequiresPython = ""
+		effective.ConstraintDeps = nil
+	}
 
 	var changedRegions []string
 	if greenfield {
 		// No existing pyproject.toml — render a fresh one. The project name comes
-		// from the directory name as a reasonable default.
+		// from the directory name as a reasonable default. Only the regions actually
+		// rendered are reported (requires-python and tool.uv are omitted under
+		// --no-constraints).
 		merged = RenderFreshPyproject(projectName(p.ProjectDir), effective)
-		changedRegions = []string{regionRequiresPython, regionToolUv}
+		if effective.RequiresPython != "" {
+			changedRegions = append(changedRegions, regionRequiresPython)
+		}
+		if effective.ConstraintDeps != nil {
+			changedRegions = append(changedRegions, regionToolUv)
+		}
 		if dbcPin != "" {
 			changedRegions = append(changedRegions, regionDatabricksConnect)
 		}
@@ -427,10 +475,14 @@ func (p *Pipeline) mergePlan(_ context.Context, pyMinor string, c *Constraints, 
 		diff := fmt.Sprint(gotextdiff.ToUnified(oldName, newName, oldStr, edits))
 
 		plan := &Plan{
-			WouldWrite:         filepath.ToSlash(pyproject),
-			Diff:               diff,
-			ChangedRegions:     changedRegions,
-			WouldInstallPython: pyMinor,
+			WouldWrite:     filepath.ToSlash(pyproject),
+			Diff:           diff,
+			ChangedRegions: changedRegions,
+		}
+		// --no-provision stops before installing Python, so the plan must not claim
+		// a Python install; every other path would provision it.
+		if !p.SkipProvision {
+			plan.WouldInstallPython = pyMinor
 		}
 		// Report a backup only when the run would actually write one (i.e. it changes
 		// the file); a no-op re-run writes none.
@@ -609,6 +661,33 @@ func (p *Pipeline) markOK(name PhaseName, detail string) {
 			return
 		}
 	}
+}
+
+// markSkipped marks a phase skipped: a flag opted out of running it. Unlike
+// markOK it carries no detail — there is nothing to report about work not done —
+// and unlike a pending phase it is a successful outcome, not a stopped one.
+func (p *Pipeline) markSkipped(name PhaseName) {
+	for i := range p.res.Phases {
+		if p.res.Phases[i].Phase == name {
+			p.res.Phases[i].Status = StatusSkipped
+			p.res.Phases[i].Detail = ""
+			return
+		}
+	}
+}
+
+// markProvisionAndValidate records the provision and validate outcomes for a run
+// that stops before executing them. Under --no-provision they are skipped; under
+// a plain --dry-run they are ok (the plan through merge succeeded and nothing
+// below would run). It is the shared tail of both non-provisioning paths.
+func (p *Pipeline) markProvisionAndValidate() {
+	if p.SkipProvision {
+		p.markSkipped(PhaseProvision)
+		p.markSkipped(PhaseValidate)
+		return
+	}
+	p.markOK(PhaseProvision, "")
+	p.markOK(PhaseValidate, "")
 }
 
 // fail marks the given phase as errored, attaches the error (with its phase and

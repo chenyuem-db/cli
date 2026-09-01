@@ -1201,3 +1201,135 @@ func TestPipelineReportsPhaseStarts(t *testing.T) {
 	// A full successful run enters every phase exactly once in canonical order.
 	assert.Equal(t, allPhases, rep.started)
 }
+
+func TestPipelineNoProvisionWritesFilesButSkipsProvisionAndValidate(t *testing.T) {
+	dir := writeProject(t)
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	// --no-provision writes the project files (a real merge, not a dry run) but
+	// stops before creating the venv: provision and validate are "skipped". It also
+	// never invokes uv — not even the preflight availability probe — so a files-only
+	// run succeeds on a machine without uv. noProvisionPM fails every PackageManager
+	// method, so this passing proves none of them (EnsureAvailable included) is called.
+	p := &Pipeline{
+		Mode: ModeDefault, SkipProvision: true, ProjectDir: dir,
+		ConstraintBaseURL: srv.URL, CacheDir: t.TempDir(),
+		Flags:   ComputeFlags{Serverless: "v4"},
+		Compute: stubCompute{}, PM: noProvisionPM{},
+	}
+	res, err := p.Run(t.Context())
+	require.NoError(t, err)
+	assert.True(t, res.OK)
+	// Files were written through the merge phase.
+	data, readErr := os.ReadFile(filepath.Join(dir, "pyproject.toml"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(data), `"databricks-connect~=17.2.0"`)
+	// Merge succeeded; provision and validate are skipped (distinct from pending,
+	// which would mean an earlier phase failed).
+	assert.Equal(t, StatusOK, phaseStatus(res, PhaseMerge))
+	assert.Equal(t, StatusSkipped, phaseStatus(res, PhaseProvision))
+	assert.Equal(t, StatusSkipped, phaseStatus(res, PhaseValidate))
+	// No venv was provisioned, so venvPath is omitted.
+	assert.Empty(t, res.VenvPath)
+}
+
+func TestPipelineNoProvisionUnderDryRunMarksProvisionValidateSkipped(t *testing.T) {
+	dir := writeProject(t)
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	// --dry-run --no-provision: nothing is provisioned (as with any dry run), but
+	// the plan reflects the real run's intent, so provision/validate are "skipped"
+	// rather than the "ok" a plain dry run reports.
+	p := &Pipeline{
+		Mode: ModeDefault, Check: true, SkipProvision: true, ProjectDir: dir,
+		ConstraintBaseURL: srv.URL, CacheDir: t.TempDir(),
+		Flags:   ComputeFlags{Serverless: "v4"},
+		Compute: stubCompute{}, PM: noProvisionPM{},
+	}
+	res, err := p.Run(t.Context())
+	require.NoError(t, err)
+	assert.True(t, res.OK)
+	require.NotNil(t, res.Plan)
+	assert.Equal(t, StatusSkipped, phaseStatus(res, PhaseProvision))
+	assert.Equal(t, StatusSkipped, phaseStatus(res, PhaseValidate))
+	assert.Empty(t, res.VenvPath)
+}
+
+func TestPipelineNoConstraintsLeavesExistingPinsUntouched(t *testing.T) {
+	dir := t.TempDir()
+	// An existing project with the user's own requires-python and no managed
+	// [tool.uv] constraint block.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(`[project]
+name = "demo"
+requires-python = ">=3.9"
+
+[dependency-groups]
+dev = ["databricks-connect~=16.0.0"]
+`), 0o644))
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	p := &Pipeline{
+		Mode: ModeDefault, SkipConstraints: true, ProjectDir: dir,
+		ConstraintBaseURL: srv.URL, CacheDir: t.TempDir(),
+		Flags:   ComputeFlags{Serverless: "v4"},
+		Compute: stubCompute{}, PM: fakePM{py: "3.12", dbc: "17.2.0"},
+	}
+	res, err := p.Run(t.Context())
+	require.NoError(t, err)
+	assert.True(t, res.OK)
+	data, _ := os.ReadFile(filepath.Join(dir, "pyproject.toml"))
+	s := string(data)
+	// requires-python keeps the user's value; the artifact's ==3.12.* is not written.
+	assert.Contains(t, s, `requires-python = ">=3.9"`)
+	assert.NotContains(t, s, "==3.12.*")
+	// No managed [tool.uv] constraint-dependencies block is written.
+	assert.NotContains(t, s, "constraint-dependencies")
+	// databricks-connect is still managed: --no-constraints is orthogonal to it.
+	assert.Contains(t, s, "databricks-connect~=17.2.0")
+}
+
+func TestPipelineNoConstraintsGreenfieldOmitsPins(t *testing.T) {
+	dir := t.TempDir()
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	p := &Pipeline{
+		Mode: ModeDefault, SkipConstraints: true, ProjectDir: dir,
+		ConstraintBaseURL: srv.URL, CacheDir: t.TempDir(),
+		Flags:   ComputeFlags{Serverless: "v4"},
+		Compute: stubCompute{}, PM: fakePM{py: "3.12", dbc: "17.2.0"},
+	}
+	res, err := p.Run(t.Context())
+	require.NoError(t, err)
+	assert.True(t, res.OK)
+	assert.True(t, res.Greenfield)
+	data, _ := os.ReadFile(filepath.Join(dir, "pyproject.toml"))
+	s := string(data)
+	// The artifact's Python pin and constraint-dependencies are not written.
+	assert.NotContains(t, s, "==3.12.*")
+	assert.NotContains(t, s, "constraint-dependencies")
+	// databricks-connect (orthogonal) is still added.
+	assert.Contains(t, s, "databricks-connect~=17.2.0")
+}
+
+func TestPipelineNoProvisionDryRunPlanOmitsWouldInstallPython(t *testing.T) {
+	dir := writeProject(t)
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	// --no-provision would not install Python, so the dry-run plan must not claim
+	// it would (wouldInstallPython is omitted).
+	p := &Pipeline{
+		Mode: ModeDefault, Check: true, SkipProvision: true, ProjectDir: dir,
+		ConstraintBaseURL: srv.URL, CacheDir: t.TempDir(),
+		Flags:   ComputeFlags{Serverless: "v4"},
+		Compute: stubCompute{}, PM: noProvisionPM{},
+	}
+	res, err := p.Run(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, res.Plan)
+	assert.Empty(t, res.Plan.WouldInstallPython)
+}

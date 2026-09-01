@@ -1,0 +1,5 @@
+# --no-provision writes the project files (a real run, not a dry run) but stops
+# before creating the venv: no Python download, uv sync, or validation. The
+# provision and validate phases report "skipped" (distinct from "pending", which
+# would mean an earlier phase failed) and venvPath is omitted.
+trace $CLI environments setup-local --serverless-version 4 --no-provision --output json

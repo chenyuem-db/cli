@@ -1,0 +1,4 @@
+# --dry-run --no-provision: nothing is provisioned (as with any dry run), but the
+# plan reflects the real run's intent, so provision and validate report "skipped"
+# rather than the "ok" a plain dry run reports.
+trace $CLI environments setup-local --serverless-version 4 --no-provision --dry-run --output json
