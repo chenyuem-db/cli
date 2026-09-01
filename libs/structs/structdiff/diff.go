@@ -227,7 +227,7 @@ func diffStruct(ctx *diffContext, path *structpath.PathNode, s1, s2 reflect.Valu
 		// Sensitive fields are marked as "json:-" so they are not accidentally stored in the state file.
 		// But we still want to diff them to detect changes based on in-memory values (comes from config and remote)
 		fieldName := jsonTag.Name()
-		if fieldName == "-" && !bundleTag.Sensitive() {
+		if structaccess.IsSkippedField(sf) && !bundleTag.Sensitive() {
 			continue
 		}
 
